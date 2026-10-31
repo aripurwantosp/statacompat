@@ -1,0 +1,31 @@
+Package: statacompat
+Title: Reproduce Selected 'Stata' Expression and Missing-Value Semantics
+Version: 1.0
+Date: 2026-10-30
+Authors@R: 
+    person(
+        given = "Ari Purwanto Sarwo", family = "Prasojo",
+        role = c("aut", "cre"),
+        email = "ari.prasojo18@gmail.com",
+        comment = c(ORCID = "0000-0002-4862-5523")
+    )
+Description: A lightweight compatibility layer for researchers translating
+    'Stata' data-management code into R. Provides vectorised helpers that
+    reproduce selected 'Stata' expression semantics where they differ from
+    base R, most importantly "Stata's" rule that numeric missing values are
+    larger than every number: relational comparisons, inlist(), inrange(),
+    cond(), missing(), and the 'egen' row functions rowtotal(), rowmean(),
+    rowmiss() and rownonmiss(). Only the ordinary missing value is fully
+    supported; "Stata's" extended missing values are detected and rejected
+    wherever they would change a result.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1.0)
+Suggests: dplyr, haven, knitr, rmarkdown, testthat (>= 3.0.0), withr
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE)
+NeedsCompilation: no
+Config/roxygen2/version: 8.1.0
+URL: https://github.com/aripurwantosp/statacompat
+BugReports: https://github.com/aripurwantosp/statacompat/issues

@@ -1,0 +1,311 @@
+---
+title: "When Stata and R Disagree: Expressions and Missing Values"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{When Stata and R Disagree: Expressions and Missing Values}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+has_dplyr <- requireNamespace("dplyr", quietly = TRUE)
+has_haven <- requireNamespace("haven", quietly = TRUE)
+```
+
+```{r setup}
+library(statacompat)
+```
+
+An expression such as `x > 5` looks the same in Stata and in R. When `x` is
+missing, the two languages give different answers. This vignette goes
+through the cases that matter when Stata data-management code is translated
+into R, and shows the statacompat helper that reproduces Stata's result in
+each case.
+
+Every rule is taken from Stata's manuals; the relevant section is given in
+brackets. Where the manuals leave a case open, the text says so.
+
+## 1. In Stata, missing is a very large number
+
+Stata orders numeric values as `all numbers < . < .a < .b < ... < .z`
+([U] 12.2.1). Relational operators always return 0 or 1 and never missing
+([U] 13.2.3). In R, any comparison with `NA` returns `NA`.
+
+```{r}
+x <- c(0, 1, 2, NA)
+
+x > 1               # R
+stata_gt(x, 1)      # Stata: x > 1
+```
+
+The table summarises the differences. Every row follows from the
+documented ordering.
+
+| Stata | Stata result | R `NA` equivalent | statacompat |
+|---|---|---|---|
+| `. == 1` | 0 | `NA` | `stata_eq(NA, 1)` → `FALSE` |
+| `. != 1` | 1 | `NA` | `stata_ne(NA, 1)` → `TRUE` |
+| `. > 1`  | 1 | `NA` | `stata_gt(NA, 1)` → `TRUE` |
+| `1 < .`  | 1 | `NA` | `stata_lt(1, NA)` → `TRUE` |
+| `. == .` | 1 | `NA` | `stata_eq(NA, NA)` → `TRUE` |
+| `. != .` | 0 | `NA` | `stata_ne(NA, NA)` → `FALSE` |
+| `. >= .` | 1 | `NA` | `stata_ge(NA, NA)` → `TRUE` |
+
+R's three-valued logic then spreads the problem. `NA | FALSE` is `NA`, so a
+combined condition built from base R comparisons can become `NA` even when
+Stata's version is a definite 0 or 1. The `stata_*()` helpers never return
+`NA`, so combining them with `&`, `|` and `!` is safe.
+
+### The `& x < .` idiom
+
+Careful Stata code excludes missing values explicitly:
+
+```stata
+gen high = income > 10000000 & income < .
+```
+
+The translation is literal: `x < .` becomes `stata_lt(x, NA)`.
+
+```{r}
+income <- c(5e6, 2.5e7, NA)
+stata_gt(income, 1e7) & stata_lt(income, NA)
+```
+
+`!missing(x)` and `stata_lt(x, NA)` are equivalent for ordinary missing
+values.
+
+## 2. `inlist()`
+
+`inlist(z, a, b, ...)` asks whether `z` equals one of the other arguments,
+using the same equality as `==`. A missing value is therefore an ordinary
+member. The manual does not discuss missing values in `inlist()`
+explicitly; this rule follows from `. == .` being true ([U] 13.2.3).
+
+```{r}
+kbli <- c(1, 4, NA)
+stata_inlist(kbli, 1, 2, 3)
+stata_inlist(kbli, 1, NA)     # Stata: inlist(kbli, 1, .)
+```
+
+Stata evaluates expressions one observation at a time. When the candidates
+are variables, row `i` of `x` is compared with row `i` of each candidate.
+R's `%in%` behaves differently: it pools every candidate value
+into a single set.
+
+```{r}
+x <- c(0, 1, 2, NA)
+a <- c(2, 0, 0, 0)
+b <- c(0, 0, 1, 0)
+stata_inlist(x, a, b)     # Stata
+x %in% c(a, b)            # pooled set: not what Stata computes
+```
+
+A vector of codes is therefore not a set. To test membership in one,
+splice it:
+
+```{r}
+codes <- c(1, 2, 3)
+do.call(stata_inlist, c(list(kbli), as.list(codes)))
+```
+
+## 3. `inrange()`
+
+`inrange(z, a, b)` is "1 if it is known that a ≤ z ≤ b" ([FN]). Stata
+applies these rules in order:
+
+1. `z` missing → 0
+2. `a` and `b` missing → 1
+3. `a` missing → `z <= b`
+4. `b` missing → `a <= z`
+5. otherwise → `a <= z & z <= b`
+
+A missing bound means *unbounded*. A missing `z` is never in range.
+
+```{r}
+age <- c(12, 15, 64, 65, NA)
+stata_inrange(age, 15, 64)
+stata_inrange(age, 15, NA)      # 15 and older; missing age excluded
+stata_ge(age, 15)               # Stata's age >= 15 includes missing age
+```
+
+The common R translation `!is.na(x) & x >= lower & x <= upper` is correct
+when both bounds are known. When a bound is missing it returns `NA`, where
+Stata returns a definite 0 or 1.
+
+## 4. `cond()`
+
+Stata reads a numeric condition as false if it is zero and true otherwise,
+and a missing value counts as "otherwise". So `cond(., a, b)` is `a`. An
+optional fourth argument gives the value to use when the condition is
+missing ([FN]).
+
+```{r}
+wage <- c(0, 1500, NA)
+ifelse(wage, "paid", "unpaid")                 # R: NA for missing
+stata_cond(wage, "paid", "unpaid")             # Stata: missing is true
+stata_cond(wage, "paid", "unpaid", "unknown")  # cond(wage, ..., ..., "unknown")
+```
+
+A relational expression is never missing, so Stata never reaches the fourth
+argument when the condition is a comparison. The same holds when the
+condition is built with `stata_*()` predicates:
+
+```{r}
+x <- c(1, 3, NA)
+stata_cond(stata_gt(x, 2), 50, 70, 99)   # Stata: cond(x > 2, 50, 70, 99)
+```
+
+A logical `NA` condition is an **error**. In R such a value almost always
+comes from a base R comparison, and there is no safe way to guess what Stata
+would have done with it. Stata's `cond(x < 2, a, b)` gives `b` for a missing
+`x`, because `. < 2` is false. Treating R's `NA` as Stata's `.` would give
+`a` instead.
+
+```{r, error = TRUE}
+stata_cond(x < 2, "a", "b")
+stata_cond(stata_lt(x, 2), "a", "b")
+```
+
+Unlike `ifelse()`, `stata_cond()` keeps the class of a `Date` result and
+does not silently mix numbers with strings.
+
+## 5. `missing()` and strings
+
+Stata's missing string is `""`. A string of spaces is **not** missing.
+Strings that come from Stata data never contain R's
+`NA_character_`. For that reason, string comparisons reject it, and
+`stata_missing()` counts it as missing.
+
+```{r}
+stata_missing(c("a", "", " "))
+stata_missing(c(30, NA, 40), c("Ari", "Prasojo", ""))   # missing(age, name)
+```
+
+Stata compares strings by their bytes ([U] 12.4.2), so every uppercase
+letter sorts before every lowercase letter. R's `<` and `>` instead follow
+the collation rules of the session locale, so the same script can give
+different answers on different computers. The `stata_*()` helpers always use
+byte order, so `"a" > "B"` is 1, as in Stata.
+
+```{r}
+stata_gt(c("apel", "Bayam"), "B")
+```
+
+## 6. `egen` row functions
+
+```{r}
+r1 <- c(1, 1, NA)
+r2 <- c(2, NA, NA)
+r3 <- c(3, 3, NA)
+
+rowSums(cbind(r1, r2, r3), na.rm = TRUE)
+stata_rowtotal(r1, r2, r3)                  # egen rowtotal(): all-missing -> 0
+stata_rowtotal(r1, r2, r3, missing = TRUE)  # , missing: all-missing -> .
+
+rowMeans(cbind(r1, r2, r3), na.rm = TRUE)   # NaN
+stata_rowmean(r1, r2, r3)                   # .
+
+stata_rowmiss(r1, r2, r3)
+stata_rownonmiss(r1, r2, r3)
+```
+
+`stata_rowmiss()` accepts string variables and counts `""` as missing.
+`stata_rownonmiss()` accepts them only with `strok`, as [D] egen requires.
+The manual states that restriction only for `rownonmiss()`; that `rowmiss()`
+accepts strings is inferred from this.
+
+```{r}
+stata_rowmiss(c(1, 1, NA), c("a", "", ""))
+stata_rownonmiss(c(1, 1, NA), c("a", "", ""), strok = TRUE)
+```
+
+Inside `mutate()`, select the variables with `pick()`:
+
+```{r, eval = has_dplyr}
+dta <- data.frame(r1 = r1, r2 = r2, r3 = r3)
+dplyr::mutate(dta, total = stata_rowtotal(dplyr::pick(r1:r3)))
+```
+
+### Precision
+
+Stata's default storage type for new variables is `float` (see
+`set type`), and `egen` without an explicit type is assumed to follow it. A
+`float` holds integers exactly only up to 16,777,216, so a total of
+16,777,217 cannot be stored and becomes 16,777,216. With
+`egen double t = rowtotal(a b)` the exact value is kept. R computes in double
+precision, so `stata_rowtotal()` corresponds to the `double` version:
+
+```{r}
+stata_rowtotal(16777217, 0)
+```
+
+Large monetary totals, such as household expenditure in Rupiah, can
+therefore differ by a few units from Stata output that was created without
+`double`. statacompat does not emulate `float` storage.
+
+## 7. Extended missing values
+
+Stata has 27 numeric missing values, `.` and `.a` to `.z`, and treats them
+as distinct and ordered ([U] 12.2.1), so `.a == .` is 0 and `.a > .` is 1.
+`haven::read_dta()` keeps the distinction as "tagged" `NA`s, but R itself
+cannot see it. To R, `.a` and `.b` are both `NA`, and `identical()` cannot
+tell them apart.
+
+statacompat 1.0 reads the tags. It does not reproduce the ordering among
+missing values:
+
+* Comparing a tagged missing value with a **number** gives the Stata result,
+  because every missing value is larger than every number.
+* `stata_inrange()`, `stata_cond()`, `stata_missing()` and the row functions
+  give the Stata result, because they only ask *whether* a value is missing.
+* Comparing **two different missing values** is an error. This includes
+  `stata_inlist(x, ..., NA)` when `x` is `.a`. The package refuses to guess
+  rather than return a wrong answer.
+
+```{r, eval = has_haven, error = TRUE}
+a <- haven::tagged_na("a")
+stata_gt(a, 100)          # .a > 100: TRUE in Stata
+stata_inrange(5, a, NA)   # missing bound = unbounded
+stata_eq(a, NA)           # .a == . is 0 in Stata; not reproduced
+```
+
+To treat every missing value as `.`, remove the tags first:
+
+```{r, eval = has_haven}
+v <- c(1, haven::tagged_na("a"), NA)
+v[is.na(v)] <- NA_real_
+stata_eq(v, NA)
+```
+
+## 8. Migrating from "missing-safe" helpers
+
+Some R projects use helpers such as
+`is_greater <- function(x, value) !is.na(x) & x > value`. These are
+**not** literal Stata translations. They return `FALSE` whenever `x` is
+missing, which corresponds to the careful Stata idiom `x > value & x < .`,
+not to `x > value`.
+
+| Helper | Matches Stata expression | statacompat equivalent |
+|---|---|---|
+| `!is.na(x) & x == v` | `x == v` (v not missing) | `stata_eq(x, v)` |
+| `!is.na(x) & x != v` | `x != v & x < .` | `stata_ne(x, v) & stata_lt(x, NA)` |
+| `!is.na(x) & x > v` | `x > v & x < .` | `stata_gt(x, v) & stata_lt(x, NA)` |
+| `!is.na(x) & x >= v` | `x >= v & x < .` | `stata_ge(x, v) & stata_lt(x, NA)` |
+| `!is.na(x) & x < v` | `x < v` | `stata_lt(x, v)` |
+| `!is.na(x) & x <= v` | `x <= v` | `stata_le(x, v)` |
+| `!is.na(x) & x %in% c(...)` | `inlist(x, ...)` only for scalar, non-missing candidates | `stata_inlist(x, ...)` |
+| `!is.na(x) & x >= lo & x <= hi` | `inrange(x, lo, hi)` only if both bounds are known | `stata_inrange(x, lo, hi)` |
+
+Before switching, check which Stata expression the original `.do` file
+actually used. If it was `gen y = x > 5` without `& x < .`, the old helper
+and Stata disagree for missing `x`, and the replacement will change your
+results. In that case the change is a correction towards what the original
+Stata code computed.
+
+## 9. What is not covered
+
+Arithmetic (`1/0` is `.` in Stata but `Inf` in R), `float` storage, Stata's
+logical operators applied to missing numbers (`5 & .` is 1 in Stata),
+`recode`, `_n` and `_N`, `bysort`, and `egen group()` are outside the scope
+of version 1.0
