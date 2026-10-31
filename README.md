@@ -176,7 +176,7 @@ or from github:
 ```r
 # github
 # install.packages("remotes")
-remotes::install_github("aripurwantosp/statacompat")
+remotes::install_github("aripurwantosp/statacompat", build_vignettes = TRUE)
 ```
 
 statacompat has no runtime dependencies beyond base R (R >= 4.1).
